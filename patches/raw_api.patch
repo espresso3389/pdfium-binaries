@@ -1,0 +1,545 @@
+diff --git a/BUILD.gn b/BUILD.gn
+index 57a42b0b1..eea7f07c5 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -220,6 +220,7 @@ source_set("pdfium_public_headers_impl") {
+     "public/fpdf_javascript.h",
+     "public/fpdf_ppo.h",
+     "public/fpdf_progressive.h",
++    "public/fpdf_raw.h",
+     "public/fpdf_save.h",
+     "public/fpdf_searchex.h",
+     "public/fpdf_signature.h",
+diff --git a/fpdfsdk/BUILD.gn b/fpdfsdk/BUILD.gn
+index fa21e2046..056b0c2e1 100644
+--- a/fpdfsdk/BUILD.gn
++++ b/fpdfsdk/BUILD.gn
+@@ -50,6 +50,7 @@ source_set("fpdfsdk") {
+     "fpdf_javascript.cpp",
+     "fpdf_ppo.cpp",
+     "fpdf_progressive.cpp",
++    "fpdf_raw.cpp",
+     "fpdf_save.cpp",
+     "fpdf_searchex.cpp",
+     "fpdf_signature.cpp",
+diff --git a/fpdfsdk/fpdf_raw.cpp b/fpdfsdk/fpdf_raw.cpp
+new file mode 100644
+index 000000000..11f049899
+--- /dev/null
++++ b/fpdfsdk/fpdf_raw.cpp
+@@ -0,0 +1,379 @@
++// Copyright 2026 The PDFium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "public/fpdf_raw.h"
++
++#include <cstring>
++#include <utility>
++
++#include "core/fpdfapi/parser/cpdf_array.h"
++#include "core/fpdfapi/parser/cpdf_boolean.h"
++#include "core/fpdfapi/parser/cpdf_dictionary.h"
++#include "core/fpdfapi/parser/cpdf_document.h"
++#include "core/fpdfapi/parser/cpdf_name.h"
++#include "core/fpdfapi/parser/cpdf_null.h"
++#include "core/fpdfapi/parser/cpdf_number.h"
++#include "core/fpdfapi/parser/cpdf_reference.h"
++#include "core/fpdfapi/parser/cpdf_stream.h"
++#include "core/fpdfapi/parser/cpdf_stream_acc.h"
++#include "core/fpdfapi/parser/cpdf_string.h"
++#include "core/fxcrt/compiler_specific.h"
++#include "core/fxcrt/retain_ptr.h"
++#include "fpdfsdk/cpdfsdk_helpers.h"
++
++struct FPDF_RAW_OBJECT__ {
++  explicit FPDF_RAW_OBJECT__(RetainPtr<CPDF_Object> object)
++      : object(std::move(object)) {}
++  RetainPtr<CPDF_Object> object;
++};
++
++namespace {
++
++FPDF_RAW_OBJECT Wrap(RetainPtr<CPDF_Object> object) {
++  return object ? new FPDF_RAW_OBJECT__(std::move(object)) : nullptr;
++}
++
++CPDF_Object* Unwrap(FPDF_RAW_OBJECT object) {
++  return object ? object->object.Get() : nullptr;
++}
++
++ByteString Bytes(const void* data, size_t length) {
++  if (!data && length)
++    return ByteString();
++  return UNSAFE_BUFFERS(
++      ByteString(static_cast<const uint8_t*>(data), length));
++}
++
++pdfium::span<const uint8_t> Span(const void* data, size_t length) {
++  if (!data && length)
++    return {};
++  return UNSAFE_BUFFERS(
++      pdfium::span(static_cast<const uint8_t*>(data), length));
++}
++
++size_t CopyBytes(pdfium::span<const uint8_t> source,
++                 void* buffer,
++                 size_t buffer_length) {
++  if (buffer && buffer_length >= source.size()) {
++    UNSAFE_BUFFERS(std::memcpy(buffer, source.data(), source.size()));
++  }
++  return source.size();
++}
++
++size_t CopyBytes(ByteStringView source,
++                 void* buffer,
++                 size_t buffer_length) {
++  return CopyBytes(source.unsigned_span(), buffer, buffer_length);
++}
++
++}  // namespace
++
++FPDF_EXPORT FPDF_RAW_OBJECT FPDF_CALLCONV
++FPDFRaw_GetRoot(FPDF_DOCUMENT document) {
++  CPDF_Document* doc = CPDFDocumentFromFPDFDocument(document);
++  return doc ? Wrap(doc->GetMutableRoot()) : nullptr;
++}
++
++FPDF_EXPORT uint32_t FPDF_CALLCONV
++FPDFRaw_GetLastObjectNumber(FPDF_DOCUMENT document) {
++  CPDF_Document* doc = CPDFDocumentFromFPDFDocument(document);
++  return doc ? doc->GetLastObjNum() : 0;
++}
++
++FPDF_EXPORT FPDF_RAW_OBJECT FPDF_CALLCONV
++FPDFRaw_GetIndirectObject(FPDF_DOCUMENT document, uint32_t object_number) {
++  CPDF_Document* doc = CPDFDocumentFromFPDFDocument(document);
++  return doc ? Wrap(doc->GetOrParseIndirectObject(object_number)) : nullptr;
++}
++
++FPDF_EXPORT uint32_t FPDF_CALLCONV
++FPDFRaw_AddIndirectObject(FPDF_DOCUMENT document, FPDF_RAW_OBJECT object) {
++  CPDF_Document* doc = CPDFDocumentFromFPDFDocument(document);
++  CPDF_Object* obj = Unwrap(object);
++  if (!doc || !obj || !obj->IsInline())
++    return 0;
++  return doc->AddIndirectObject(object->object);
++}
++
++FPDF_EXPORT FPDF_BOOL FPDF_CALLCONV
++FPDFRaw_DeleteIndirectObject(FPDF_DOCUMENT document, uint32_t object_number) {
++  CPDF_Document* doc = CPDFDocumentFromFPDFDocument(document);
++  if (!doc || !doc->GetOrParseIndirectObject(object_number))
++    return false;
++  doc->DeleteIndirectObject(object_number);
++  return true;
++}
++
++FPDF_EXPORT void FPDF_CALLCONV FPDFRaw_CloseObject(FPDF_RAW_OBJECT object) {
++  delete object;
++}
++
++FPDF_EXPORT FPDF_RAW_OBJECT FPDF_CALLCONV
++FPDFRaw_CloneObject(FPDF_RAW_OBJECT object) {
++  CPDF_Object* obj = Unwrap(object);
++  return obj ? Wrap(obj->Clone()) : nullptr;
++}
++
++FPDF_EXPORT FPDF_OBJECT_TYPE FPDF_CALLCONV
++FPDFRaw_GetObjectType(FPDF_RAW_OBJECT object) {
++  CPDF_Object* obj = Unwrap(object);
++  return obj ? obj->GetType() : FPDF_OBJECT_UNKNOWN;
++}
++
++FPDF_EXPORT uint32_t FPDF_CALLCONV
++FPDFRaw_GetObjectNumber(FPDF_RAW_OBJECT object) {
++  CPDF_Object* obj = Unwrap(object);
++  return obj ? obj->GetObjNum() : 0;
++}
++
++FPDF_EXPORT uint32_t FPDF_CALLCONV
++FPDFRaw_GetGenerationNumber(FPDF_RAW_OBJECT object) {
++  CPDF_Object* obj = Unwrap(object);
++  return obj ? obj->GetGenNum() : 0;
++}
++
++FPDF_EXPORT FPDF_RAW_OBJECT FPDF_CALLCONV
++FPDFRaw_GetDirectObject(FPDF_RAW_OBJECT object) {
++  CPDF_Object* obj = Unwrap(object);
++  return obj ? Wrap(obj->GetMutableDirect()) : nullptr;
++}
++
++FPDF_EXPORT FPDF_RAW_OBJECT FPDF_CALLCONV FPDFRaw_NewNull() {
++  return Wrap(pdfium::MakeRetain<CPDF_Null>());
++}
++
++FPDF_EXPORT FPDF_RAW_OBJECT FPDF_CALLCONV
++FPDFRaw_NewBoolean(FPDF_BOOL value) {
++  return Wrap(pdfium::MakeRetain<CPDF_Boolean>(!!value));
++}
++
++FPDF_EXPORT FPDF_RAW_OBJECT FPDF_CALLCONV FPDFRaw_NewInteger(int value) {
++  return Wrap(pdfium::MakeRetain<CPDF_Number>(value));
++}
++
++FPDF_EXPORT FPDF_RAW_OBJECT FPDF_CALLCONV FPDFRaw_NewNumber(float value) {
++  return Wrap(pdfium::MakeRetain<CPDF_Number>(value));
++}
++
++FPDF_EXPORT FPDF_RAW_OBJECT FPDF_CALLCONV
++FPDFRaw_NewString(const void* data, size_t length) {
++  if (!data && length)
++    return nullptr;
++  return Wrap(pdfium::MakeRetain<CPDF_String>(
++      WeakPtr<ByteStringPool>(), Bytes(data, length)));
++}
++
++FPDF_EXPORT FPDF_RAW_OBJECT FPDF_CALLCONV
++FPDFRaw_NewName(const char* data, size_t length) {
++  if (!data && length)
++    return nullptr;
++  return Wrap(pdfium::MakeRetain<CPDF_Name>(
++      WeakPtr<ByteStringPool>(), Bytes(data, length)));
++}
++
++FPDF_EXPORT FPDF_RAW_OBJECT FPDF_CALLCONV FPDFRaw_NewArray() {
++  return Wrap(pdfium::MakeRetain<CPDF_Array>());
++}
++
++FPDF_EXPORT FPDF_RAW_OBJECT FPDF_CALLCONV FPDFRaw_NewDictionary() {
++  return Wrap(pdfium::MakeRetain<CPDF_Dictionary>());
++}
++
++FPDF_EXPORT FPDF_RAW_OBJECT FPDF_CALLCONV
++FPDFRaw_NewStream(const void* data, size_t length) {
++  if (!data && length)
++    return nullptr;
++  return Wrap(pdfium::MakeRetain<CPDF_Stream>(Span(data, length)));
++}
++
++FPDF_EXPORT FPDF_RAW_OBJECT FPDF_CALLCONV
++FPDFRaw_NewReference(FPDF_DOCUMENT document, uint32_t object_number) {
++  CPDF_Document* doc = CPDFDocumentFromFPDFDocument(document);
++  return doc ? Wrap(pdfium::MakeRetain<CPDF_Reference>(doc, object_number))
++             : nullptr;
++}
++
++FPDF_EXPORT FPDF_BOOL FPDF_CALLCONV
++FPDFRaw_GetBoolean(FPDF_RAW_OBJECT object) {
++  const CPDF_Boolean* value = ToBoolean(Unwrap(object));
++  return value ? !!value->GetInteger() : false;
++}
++
++FPDF_EXPORT int FPDF_CALLCONV FPDFRaw_GetInteger(FPDF_RAW_OBJECT object) {
++  CPDF_Object* obj = Unwrap(object);
++  return obj ? obj->GetInteger() : 0;
++}
++
++FPDF_EXPORT float FPDF_CALLCONV FPDFRaw_GetNumber(FPDF_RAW_OBJECT object) {
++  CPDF_Object* obj = Unwrap(object);
++  return obj ? obj->GetNumber() : 0;
++}
++
++FPDF_EXPORT size_t FPDF_CALLCONV FPDFRaw_GetString(
++    FPDF_RAW_OBJECT object,
++    void* buffer,
++    size_t buffer_length) {
++  CPDF_Object* obj = Unwrap(object);
++  return obj ? CopyBytes(obj->GetString().AsStringView(), buffer, buffer_length)
++             : 0;
++}
++
++FPDF_EXPORT FPDF_BOOL FPDF_CALLCONV FPDFRaw_SetString(
++    FPDF_RAW_OBJECT object,
++    const void* data,
++    size_t length) {
++  CPDF_Object* obj = Unwrap(object);
++  if (!obj || (!data && length) ||
++      !(obj->IsBoolean() || obj->IsNumber() || obj->IsName() ||
++        obj->IsString())) {
++    return false;
++  }
++  obj->SetString(Bytes(data, length));
++  return true;
++}
++
++FPDF_EXPORT uint32_t FPDF_CALLCONV
++FPDFRaw_GetReferenceObjectNumber(FPDF_RAW_OBJECT object) {
++  const CPDF_Reference* reference = ToReference(Unwrap(object));
++  return reference ? reference->GetRefObjNum() : 0;
++}
++
++FPDF_EXPORT size_t FPDF_CALLCONV
++FPDFRaw_DictionaryGetCount(FPDF_RAW_OBJECT dictionary) {
++  const CPDF_Dictionary* dict = ToDictionary(Unwrap(dictionary));
++  return dict ? dict->size() : 0;
++}
++
++FPDF_EXPORT size_t FPDF_CALLCONV FPDFRaw_DictionaryGetKey(
++    FPDF_RAW_OBJECT dictionary,
++    size_t index,
++    void* buffer,
++    size_t buffer_length) {
++  const CPDF_Dictionary* dict = ToDictionary(Unwrap(dictionary));
++  if (!dict)
++    return 0;
++  std::vector<ByteString> keys = dict->GetKeys();
++  return index < keys.size()
++             ? CopyBytes(keys[index].AsStringView(), buffer, buffer_length)
++             : 0;
++}
++
++FPDF_EXPORT FPDF_RAW_OBJECT FPDF_CALLCONV FPDFRaw_DictionaryGet(
++    FPDF_RAW_OBJECT dictionary,
++    const char* key,
++    size_t key_length) {
++  CPDF_Dictionary* dict = ToDictionary(Unwrap(dictionary));
++  if (!dict || (!key && key_length))
++    return nullptr;
++  ByteString key_string = Bytes(key, key_length);
++  return Wrap(dict->GetMutableObjectFor(key_string.AsStringView()));
++}
++
++FPDF_EXPORT FPDF_BOOL FPDF_CALLCONV FPDFRaw_DictionarySet(
++    FPDF_RAW_OBJECT dictionary,
++    const char* key,
++    size_t key_length,
++    FPDF_RAW_OBJECT value) {
++  CPDF_Dictionary* dict = ToDictionary(Unwrap(dictionary));
++  CPDF_Object* obj = Unwrap(value);
++  if (!dict || !obj || obj->IsStream() || (!key && key_length))
++    return false;
++  dict->SetFor(Bytes(key, key_length), value->object);
++  return true;
++}
++
++FPDF_EXPORT FPDF_BOOL FPDF_CALLCONV FPDFRaw_DictionaryRemove(
++    FPDF_RAW_OBJECT dictionary,
++    const char* key,
++    size_t key_length) {
++  CPDF_Dictionary* dict = ToDictionary(Unwrap(dictionary));
++  if (!dict || (!key && key_length))
++    return false;
++  ByteString key_string = Bytes(key, key_length);
++  return !!dict->RemoveFor(key_string.AsStringView());
++}
++
++FPDF_EXPORT size_t FPDF_CALLCONV
++FPDFRaw_ArrayGetCount(FPDF_RAW_OBJECT array) {
++  const CPDF_Array* values = ToArray(Unwrap(array));
++  return values ? values->size() : 0;
++}
++
++FPDF_EXPORT FPDF_RAW_OBJECT FPDF_CALLCONV
++FPDFRaw_ArrayGet(FPDF_RAW_OBJECT array, size_t index) {
++  CPDF_Array* values = ToArray(Unwrap(array));
++  return values ? Wrap(values->GetMutableObjectAt(index)) : nullptr;
++}
++
++FPDF_EXPORT FPDF_BOOL FPDF_CALLCONV
++FPDFRaw_ArrayAppend(FPDF_RAW_OBJECT array, FPDF_RAW_OBJECT value) {
++  CPDF_Array* values = ToArray(Unwrap(array));
++  CPDF_Object* obj = Unwrap(value);
++  if (!values || !obj || obj->IsStream())
++    return false;
++  values->Append(value->object);
++  return true;
++}
++
++FPDF_EXPORT FPDF_BOOL FPDF_CALLCONV
++FPDFRaw_ArraySet(FPDF_RAW_OBJECT array,
++                 size_t index,
++                 FPDF_RAW_OBJECT value) {
++  CPDF_Array* values = ToArray(Unwrap(array));
++  CPDF_Object* obj = Unwrap(value);
++  if (!values || !obj || obj->IsStream() || index >= values->size())
++    return false;
++  values->SetAt(index, value->object);
++  return true;
++}
++
++FPDF_EXPORT FPDF_BOOL FPDF_CALLCONV
++FPDFRaw_ArrayRemove(FPDF_RAW_OBJECT array, size_t index) {
++  CPDF_Array* values = ToArray(Unwrap(array));
++  if (!values || index >= values->size())
++    return false;
++  values->RemoveAt(index);
++  return true;
++}
++
++FPDF_EXPORT FPDF_RAW_OBJECT FPDF_CALLCONV
++FPDFRaw_StreamGetDictionary(FPDF_RAW_OBJECT stream) {
++  CPDF_Stream* value = ToStream(Unwrap(stream));
++  return value ? Wrap(value->GetMutableDict()) : nullptr;
++}
++
++FPDF_EXPORT size_t FPDF_CALLCONV FPDFRaw_StreamGetData(
++    FPDF_RAW_OBJECT stream,
++    void* buffer,
++    size_t buffer_length) {
++  CPDF_Stream* value = ToStream(Unwrap(stream));
++  if (!value)
++    return 0;
++  auto access = pdfium::MakeRetain<CPDF_StreamAcc>(pdfium::WrapRetain(value));
++  access->LoadAllDataFiltered();
++  return CopyBytes(access->GetSpan(), buffer, buffer_length);
++}
++
++FPDF_EXPORT size_t FPDF_CALLCONV FPDFRaw_StreamGetRawData(
++    FPDF_RAW_OBJECT stream,
++    void* buffer,
++    size_t buffer_length) {
++  CPDF_Stream* value = ToStream(Unwrap(stream));
++  if (!value)
++    return 0;
++  auto access = pdfium::MakeRetain<CPDF_StreamAcc>(pdfium::WrapRetain(value));
++  access->LoadAllDataRaw();
++  return CopyBytes(access->GetSpan(), buffer, buffer_length);
++}
++
++FPDF_EXPORT FPDF_BOOL FPDF_CALLCONV FPDFRaw_StreamSetData(
++    FPDF_RAW_OBJECT stream,
++    const void* data,
++    size_t length) {
++  CPDF_Stream* value = ToStream(Unwrap(stream));
++  if (!value || (!data && length))
++    return false;
++  value->SetDataAndRemoveFilter(Span(data, length));
++  return true;
++}
+diff --git a/public/fpdf_raw.h b/public/fpdf_raw.h
+new file mode 100644
+index 000000000..2fd841b75
+--- /dev/null
++++ b/public/fpdf_raw.h
+@@ -0,0 +1,130 @@
++// Copyright 2026 The PDFium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef PUBLIC_FPDF_RAW_H_
++#define PUBLIC_FPDF_RAW_H_
++
++#include <stddef.h>
++#include <stdint.h>
++
++#include "fpdfview.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++// An owning handle to a PDF object. Close every non-null handle returned by
++// this API with FPDFRaw_CloseObject(). Reference objects do not retain their
++// target document, so the FPDF_DOCUMENT must outlive all handles made from it.
++typedef struct FPDF_RAW_OBJECT__* FPDF_RAW_OBJECT;
++
++// Document and cross-reference access.
++FPDF_EXPORT FPDF_RAW_OBJECT FPDF_CALLCONV
++FPDFRaw_GetRoot(FPDF_DOCUMENT document);
++FPDF_EXPORT uint32_t FPDF_CALLCONV
++FPDFRaw_GetLastObjectNumber(FPDF_DOCUMENT document);
++FPDF_EXPORT FPDF_RAW_OBJECT FPDF_CALLCONV
++FPDFRaw_GetIndirectObject(FPDF_DOCUMENT document, uint32_t object_number);
++FPDF_EXPORT uint32_t FPDF_CALLCONV
++FPDFRaw_AddIndirectObject(FPDF_DOCUMENT document, FPDF_RAW_OBJECT object);
++FPDF_EXPORT FPDF_BOOL FPDF_CALLCONV
++FPDFRaw_DeleteIndirectObject(FPDF_DOCUMENT document, uint32_t object_number);
++
++// Object lifetime, inspection, and creation.
++FPDF_EXPORT void FPDF_CALLCONV FPDFRaw_CloseObject(FPDF_RAW_OBJECT object);
++FPDF_EXPORT FPDF_RAW_OBJECT FPDF_CALLCONV
++FPDFRaw_CloneObject(FPDF_RAW_OBJECT object);
++FPDF_EXPORT FPDF_OBJECT_TYPE FPDF_CALLCONV
++FPDFRaw_GetObjectType(FPDF_RAW_OBJECT object);
++FPDF_EXPORT uint32_t FPDF_CALLCONV
++FPDFRaw_GetObjectNumber(FPDF_RAW_OBJECT object);
++FPDF_EXPORT uint32_t FPDF_CALLCONV
++FPDFRaw_GetGenerationNumber(FPDF_RAW_OBJECT object);
++FPDF_EXPORT FPDF_RAW_OBJECT FPDF_CALLCONV
++FPDFRaw_GetDirectObject(FPDF_RAW_OBJECT object);
++
++FPDF_EXPORT FPDF_RAW_OBJECT FPDF_CALLCONV FPDFRaw_NewNull(void);
++FPDF_EXPORT FPDF_RAW_OBJECT FPDF_CALLCONV FPDFRaw_NewBoolean(FPDF_BOOL value);
++FPDF_EXPORT FPDF_RAW_OBJECT FPDF_CALLCONV FPDFRaw_NewInteger(int value);
++FPDF_EXPORT FPDF_RAW_OBJECT FPDF_CALLCONV FPDFRaw_NewNumber(float value);
++FPDF_EXPORT FPDF_RAW_OBJECT FPDF_CALLCONV
++FPDFRaw_NewString(const void* data, size_t length);
++FPDF_EXPORT FPDF_RAW_OBJECT FPDF_CALLCONV
++FPDFRaw_NewName(const char* data, size_t length);
++FPDF_EXPORT FPDF_RAW_OBJECT FPDF_CALLCONV FPDFRaw_NewArray(void);
++FPDF_EXPORT FPDF_RAW_OBJECT FPDF_CALLCONV FPDFRaw_NewDictionary(void);
++FPDF_EXPORT FPDF_RAW_OBJECT FPDF_CALLCONV
++FPDFRaw_NewStream(const void* data, size_t length);
++FPDF_EXPORT FPDF_RAW_OBJECT FPDF_CALLCONV
++FPDFRaw_NewReference(FPDF_DOCUMENT document, uint32_t object_number);
++
++FPDF_EXPORT FPDF_BOOL FPDF_CALLCONV
++FPDFRaw_GetBoolean(FPDF_RAW_OBJECT object);
++FPDF_EXPORT int FPDF_CALLCONV FPDFRaw_GetInteger(FPDF_RAW_OBJECT object);
++FPDF_EXPORT float FPDF_CALLCONV FPDFRaw_GetNumber(FPDF_RAW_OBJECT object);
++// Returns the byte count required. Copies only when buffer_length is large
++// enough; no trailing NUL is included.
++FPDF_EXPORT size_t FPDF_CALLCONV
++FPDFRaw_GetString(FPDF_RAW_OBJECT object, void* buffer, size_t buffer_length);
++FPDF_EXPORT FPDF_BOOL FPDF_CALLCONV
++FPDFRaw_SetString(FPDF_RAW_OBJECT object, const void* data, size_t length);
++FPDF_EXPORT uint32_t FPDF_CALLCONV
++FPDFRaw_GetReferenceObjectNumber(FPDF_RAW_OBJECT object);
++
++// Dictionary access. Keys are byte strings and need not be NUL-terminated.
++FPDF_EXPORT size_t FPDF_CALLCONV
++FPDFRaw_DictionaryGetCount(FPDF_RAW_OBJECT dictionary);
++FPDF_EXPORT size_t FPDF_CALLCONV FPDFRaw_DictionaryGetKey(
++    FPDF_RAW_OBJECT dictionary,
++    size_t index,
++    void* buffer,
++    size_t buffer_length);
++FPDF_EXPORT FPDF_RAW_OBJECT FPDF_CALLCONV FPDFRaw_DictionaryGet(
++    FPDF_RAW_OBJECT dictionary,
++    const char* key,
++    size_t key_length);
++FPDF_EXPORT FPDF_BOOL FPDF_CALLCONV FPDFRaw_DictionarySet(
++    FPDF_RAW_OBJECT dictionary,
++    const char* key,
++    size_t key_length,
++    FPDF_RAW_OBJECT value);
++FPDF_EXPORT FPDF_BOOL FPDF_CALLCONV FPDFRaw_DictionaryRemove(
++    FPDF_RAW_OBJECT dictionary,
++    const char* key,
++    size_t key_length);
++
++// Array access.
++FPDF_EXPORT size_t FPDF_CALLCONV
++FPDFRaw_ArrayGetCount(FPDF_RAW_OBJECT array);
++FPDF_EXPORT FPDF_RAW_OBJECT FPDF_CALLCONV
++FPDFRaw_ArrayGet(FPDF_RAW_OBJECT array, size_t index);
++FPDF_EXPORT FPDF_BOOL FPDF_CALLCONV
++FPDFRaw_ArrayAppend(FPDF_RAW_OBJECT array, FPDF_RAW_OBJECT value);
++FPDF_EXPORT FPDF_BOOL FPDF_CALLCONV
++FPDFRaw_ArraySet(FPDF_RAW_OBJECT array, size_t index, FPDF_RAW_OBJECT value);
++FPDF_EXPORT FPDF_BOOL FPDF_CALLCONV
++FPDFRaw_ArrayRemove(FPDF_RAW_OBJECT array, size_t index);
++
++// Stream access. GetData() decodes filters; GetRawData() does not. SetData()
++// stores unfiltered bytes and removes /Filter and /DecodeParms.
++FPDF_EXPORT FPDF_RAW_OBJECT FPDF_CALLCONV
++FPDFRaw_StreamGetDictionary(FPDF_RAW_OBJECT stream);
++FPDF_EXPORT size_t FPDF_CALLCONV FPDFRaw_StreamGetData(
++    FPDF_RAW_OBJECT stream,
++    void* buffer,
++    size_t buffer_length);
++FPDF_EXPORT size_t FPDF_CALLCONV FPDFRaw_StreamGetRawData(
++    FPDF_RAW_OBJECT stream,
++    void* buffer,
++    size_t buffer_length);
++FPDF_EXPORT FPDF_BOOL FPDF_CALLCONV FPDFRaw_StreamSetData(
++    FPDF_RAW_OBJECT stream,
++    const void* data,
++    size_t length);
++
++#ifdef __cplusplus
++}  // extern "C"
++#endif
++
++#endif  // PUBLIC_FPDF_RAW_H_
